@@ -7,7 +7,7 @@ from uuid import uuid4
 import copy
 
 from ml_vitals import load_model, predict_vitals_anomaly
-from routing_agent import find_best_hospital, HOSPITALS, score_hospital
+from routing_agent import find_best_hospital, HOSPITALS, score_hospital, haversine
 import socketio
 from socket_server import sio, emit_location, emit_confirmed
 
@@ -37,6 +37,42 @@ app.add_middleware(
 HOSPITALS_DB = copy.deepcopy(HOSPITALS)
 EMERGENCIES_DB = {}
 
+AMBULANCES_DB = [
+  {
+    "id": "AMB-001",
+    "driver_name": "Kumar Raja",
+    "phone": "+919876543210",
+    "vehicle_number": "TN33 AB 1234",
+    "vehicle_type": "Advanced Life Support",
+    "current_lat": 11.0200,
+    "current_lng": 76.9600,
+    "status": "available",
+    "assigned_emergency": None
+  },
+  {
+    "id": "AMB-002", 
+    "driver_name": "Ravi Shankar",
+    "phone": "+919876543211",
+    "vehicle_number": "TN33 CD 5678",
+    "vehicle_type": "Basic Life Support",
+    "current_lat": 11.0100,
+    "current_lng": 76.9500,
+    "status": "available",
+    "assigned_emergency": None
+  },
+  {
+    "id": "AMB-003",
+    "driver_name": "Senthil Kumar",
+    "phone": "+919876543212",
+    "vehicle_number": "TN33 EF 9012",
+    "vehicle_type": "Patient Transport",
+    "current_lat": 11.0300,
+    "current_lng": 76.9700,
+    "status": "available",
+    "assigned_emergency": None
+  }
+]
+
 @app.on_event("startup")
 def startup_event():
     global ml_model, ml_scaler
@@ -60,6 +96,9 @@ class HospitalUpdate(BaseModel):
     icu_beds: Optional[int] = None
     has_oxygen: Optional[bool] = None
     has_er_doctor: Optional[bool] = None
+    doctor_count: Optional[int] = None
+    doctor_available: Optional[bool] = None
+    specialty: Optional[str] = None
 
 class VitalsSubmission(BaseModel):
     emergency_id: str
@@ -71,6 +110,20 @@ class VitalsSubmission(BaseModel):
 class HospitalAcceptance(BaseModel):
     confirmed_by: str = "ER Admin"
     message: str = ""
+
+class AmbulanceRegister(BaseModel):
+    driver_name: str
+    phone: str
+    vehicle_number: str
+    vehicle_type: str = "Basic Life Support"
+    current_lat: float = 11.0168
+    current_lng: float = 76.9558
+
+class AmbulanceUpdate(BaseModel):
+    status: Optional[str] = None
+    current_lat: Optional[float] = None
+    current_lng: Optional[float] = None
+    assigned_emergency: Optional[str] = None
 
 @app.get("/")
 def root():
@@ -183,13 +236,21 @@ def update_hospital(hospital_id: int, update: HospitalUpdate):
         h['oxygen'] = update.has_oxygen
     if update.has_er_doctor is not None:
         h['doctor'] = update.has_er_doctor
+    if update.doctor_count is not None:
+        h['doctor_count'] = update.doctor_count
+    if update.doctor_available is not None:
+        h['doctor_available'] = update.doctor_available
+    if update.specialty is not None:
+        h['specialty'] = update.specialty
         
     res = find_best_hospital(HOSPITALS_DB, 11.0168, 76.9558)
     
     return {
         "success": True,
         "updated_hospital": h,
-        "new_rankings": res['all_ranked']
+        "new_rankings": res['all_ranked'],
+        "skipped_count": len(res['skipped_hospitals']),
+        "message": f"Rankings updated. {len(res['skipped_hospitals'])} hospitals skipped."
     }
 
 @app.post("/vitals")
@@ -243,5 +304,75 @@ def get_emergency(emergency_id: str):
         
     return EMERGENCIES_DB[emergency_id]
 
-app = socketio.ASGIApp(sio, app)
+@app.post("/ambulance/register")
+def register_ambulance(amb: AmbulanceRegister):
+    ambulance_id = "AMB-" + str(uuid4())[:6].upper()
+    new_amb = amb.dict() if hasattr(amb, 'dict') else amb.model_dump()
+    new_amb["id"] = ambulance_id
+    new_amb["status"] = "available"
+    new_amb["assigned_emergency"] = None
+    
+    AMBULANCES_DB.append(new_amb)
+    return {
+        "success": True,
+        "ambulance_id": ambulance_id,
+        "driver_name": new_amb["driver_name"],
+        "vehicle_number": new_amb["vehicle_number"],
+        "message": "Ambulance registered"
+    }
 
+@app.get("/ambulance/nearest")
+def nearest_ambulance(lat: float, lng: float):
+    available = [a for a in AMBULANCES_DB if a["status"] == "available"]
+    
+    if not available:
+        return {
+            "nearest_ambulance": None,
+            "all_available": [],
+            "total_available": 0,
+            "message": "No available ambulances found"
+        }
+    
+    for amb in available:
+        dist = haversine(lat, lng, amb["current_lat"], amb["current_lng"])
+        amb["distance_km"] = round(dist, 2)
+        amb["eta_minutes"] = round(dist / 0.5, 1)
+        
+    available.sort(key=lambda x: x["distance_km"])
+    
+    return {
+        "nearest_ambulance": available[0],
+        "all_available": available,
+        "total_available": len(available)
+    }
+
+@app.get("/ambulance")
+def get_ambulance():
+    available_count = sum(1 for a in AMBULANCES_DB if a["status"] == "available")
+    return {
+        "ambulances": AMBULANCES_DB,
+        "total": len(AMBULANCES_DB),
+        "available": available_count
+    }
+
+@app.patch("/ambulance/{ambulance_id}")
+def update_ambulance_status(ambulance_id: str, update: AmbulanceUpdate):
+    for amb in AMBULANCES_DB:
+        if amb["id"] == ambulance_id:
+            if update.status is not None:
+                amb["status"] = update.status
+            if update.current_lat is not None:
+                amb["current_lat"] = update.current_lat
+            if update.current_lng is not None:
+                amb["current_lng"] = update.current_lng
+            if update.assigned_emergency is not None:
+                amb["assigned_emergency"] = update.assigned_emergency
+                
+            return {
+                "success": True,
+                "updated_ambulance": amb
+            }
+            
+    raise HTTPException(status_code=404, detail="Ambulance not found")
+
+app = socketio.ASGIApp(sio, app)
