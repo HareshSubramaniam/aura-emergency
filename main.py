@@ -167,6 +167,29 @@ def trigger_emergency(req: EmergencyRequest):
         "readiness_score": float(best_hosp['readiness_score']) if best_hosp else 0.0
     }
     
+    nearest_amb = None
+    nearest_dist = float('inf')
+    for amb in AMBULANCES_DB:
+        if amb['status'] == 'available':
+            d = haversine(req.patient_lat, req.patient_lng,
+                          amb['current_lat'], amb['current_lng'])
+            if d < nearest_dist:
+                nearest_dist = d
+                nearest_amb = amb
+                
+    if nearest_amb:
+        nearest_amb['status'] = 'en_route_to_patient'
+        nearest_amb['assigned_emergency'] = emergency_id
+        assigned_ambulance = {
+            "ambulance_id": nearest_amb['id'],
+            "driver_name": nearest_amb['driver_name'],
+            "driver_phone": nearest_amb['phone'],
+            "vehicle_number": nearest_amb['vehicle_number'],
+            "ambulance_eta_minutes": round(nearest_dist / 0.5, 1)
+        }
+    else:
+        assigned_ambulance = None
+    
     return {
         "emergency_id": emergency_id,
         "status": "dispatched",
@@ -178,7 +201,8 @@ def trigger_emergency(req: EmergencyRequest):
         "routing_formula": "Score=(0.5×Proximity)+(0.3×ICU)+(0.2×Readiness)",
         "all_hospitals_ranked": routing_result.get('all_ranked', []),
         "skipped_hospitals": routing_result.get('skipped_hospitals', []),
-        "tracking_url": f"http://localhost:5173/track/{emergency_id}"
+        "tracking_url": f"http://localhost:5173/track/{emergency_id}",
+        "assigned_ambulance": assigned_ambulance
     }
 
 

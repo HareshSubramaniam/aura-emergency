@@ -37,7 +37,7 @@ def haversine(lat1, lng1, lat2, lng2):
 
 def score_hospital(hospital, pLat, pLng):
     distance = haversine(pLat, pLng, hospital['lat'], hospital['lng'])
-    proximity = 1 / (distance + 0.1)
+    proximity = 1 / (distance + 1)
     icu_score = min(hospital['icu'] / 10, 1.0)
     has_er_doctor = hospital.get('doctor', False)
     
